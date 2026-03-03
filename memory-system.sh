@@ -2,9 +2,9 @@
 # BlackRoad Memory System Controller
 # Provides continuous memory for Claude Code sessions via PS-SHA∞ journals
 
-set -e
+set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="2.0.0"
 
 # Configuration
 MEMORY_DIR="$HOME/.blackroad/memory"
@@ -225,27 +225,28 @@ verify_integrity() {
         return 1
     fi
 
-    local entries=$(wc -l < "$JOURNAL_DIR/master-journal.jsonl")
+    local entries
+    entries=$(wc -l < "$JOURNAL_DIR/master-journal.jsonl")
     local valid=0
     local invalid=0
     local line_num=0
 
     while IFS= read -r line; do
-        ((line_num++))
+        line_num=$((line_num + 1))
         local parent_hash=$(echo "$line" | jq -r '.parent_hash')
         local stored_hash=$(echo "$line" | jq -r '.sha256')
 
         # Skip genesis entry
         if [ "$parent_hash" = "0000000000000000" ]; then
-            ((valid++))
+            valid=$((valid + 1))
             continue
         fi
 
         # Verify parent exists in previous entries
         if head -$((line_num - 1)) "$JOURNAL_DIR/master-journal.jsonl" | grep -q "\"sha256\":\"$parent_hash\""; then
-            ((valid++))
+            valid=$((valid + 1))
         else
-            ((invalid++))
+            invalid=$((invalid + 1))
             log_warning "Broken chain at entry $line_num (hash: ${stored_hash:0:8}...)"
         fi
     done < "$JOURNAL_DIR/master-journal.jsonl"

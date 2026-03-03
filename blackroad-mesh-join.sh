@@ -2,9 +2,9 @@
 # BlackRoad Mesh Network Auto-Join
 # Automatically connects any device to the BlackRoad mesh network
 
-set -e
+set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="2.0.0"
 
 # Colors
 RED='\033[0;31m'
@@ -13,9 +13,16 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-# Configuration
-HEADSCALE_URL="https://headscale.blackroad.io.blackroad.systems"
-PRE_AUTH_KEY="237ea39d43b4a69a3c98de277a9494e89567b5a11d60e8f7"
+# Configuration — BLACKROAD_MESH_KEY must be set in the environment
+HEADSCALE_URL="${BLACKROAD_HEADSCALE_URL:-https://headscale.blackroad.io.blackroad.systems}"
+PRE_AUTH_KEY="${BLACKROAD_MESH_KEY:-}"
+
+if [[ -z "$PRE_AUTH_KEY" ]]; then
+    echo -e "${RED}[ERROR]${NC} BLACKROAD_MESH_KEY environment variable is not set."
+    echo "Export the pre-auth key before running this script:"
+    echo "  export BLACKROAD_MESH_KEY=<your-key>"
+    exit 1
+fi
 
 # Helper functions
 log_info() {
