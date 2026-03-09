@@ -3,9 +3,9 @@
 # Works with Cloudflare Pages, Tunnels, and Direct IP deployments
 # No DNS API permissions required!
 
-set -e
+set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="2.0.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Colors for output
@@ -15,11 +15,11 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Configuration
-ARIA64_IP="192.168.4.64"
-ARIA64_USER="pi"
-TUNNEL_ID="72f1d60c-dcf2-4499-b02d-d7a063018b33"
-CF_ACCOUNT_ID="848cf0b18d51e0170e0d1537aec3505a"
+# Configuration — override via environment variables
+ARIA64_IP="${BLACKROAD_ARIA64_IP:-192.168.4.64}"
+ARIA64_USER="${BLACKROAD_ARIA64_USER:-pi}"
+TUNNEL_ID="${BLACKROAD_TUNNEL_ID:-72f1d60c-dcf2-4499-b02d-d7a063018b33}"
+CF_ACCOUNT_ID="${CLOUDFLARE_ACCOUNT_ID:-848cf0b18d51e0170e0d1537aec3505a}"
 
 # Helper functions
 log_info() {
@@ -89,6 +89,14 @@ DEPLOYMENT METHODS:
 EOF
 }
 
+validate_domain() {
+    local domain="$1"
+    if [[ ! "$domain" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+        log_error "Invalid domain name: $domain"
+        exit 1
+    fi
+}
+
 deploy_to_pages() {
     local domain="$1"
     local project_dir="$2"
@@ -97,6 +105,8 @@ deploy_to_pages() {
         log_error "Usage: pages <domain> <project-dir>"
         exit 1
     fi
+
+    validate_domain "$domain"
 
     log_info "Deploying $domain to Cloudflare Pages from $project_dir"
 
@@ -158,14 +168,16 @@ deploy_to_docker() {
         exit 1
     fi
 
-    log_info "Deploying $domain to aria64 Docker from $project_dir"
+    validate_domain "$domain"
 
     # Extract container name from domain
     local container_name="${domain//./-}"
 
-    # Find next available port
-    local next_port=$(ssh ${ARIA64_USER}@${ARIA64_IP} "docker ps --format '{{.Ports}}' | grep -oP '0\.0\.0\.0:\K\d+' | sort -n | tail -1")
-    next_port=$((next_port + 1))
+    # Find next available port (default to 3050 if no containers are running)
+    local last_port
+    last_port=$(ssh "${ARIA64_USER}@${ARIA64_IP}" "docker ps --format '{{.Ports}}' | grep -oP '0\.0\.0\.0:\K\d+' | sort -n | tail -1" 2>/dev/null || true)
+    last_port="${last_port:-3049}"
+    local next_port=$((last_port + 1))
 
     log_info "Assigning port: $next_port"
 
@@ -224,20 +236,20 @@ DOCKERFILE_END
 
     # Deploy to aria64
     log_info "Cloning to aria64..."
-    ssh ${ARIA64_USER}@${ARIA64_IP} "cd ~/blackroad && rm -rf $container_name && git clone https://github.com/BlackRoad-OS/$container_name.git"
+    ssh "${ARIA64_USER}@${ARIA64_IP}" "cd ~/blackroad && rm -rf ${container_name} && git clone https://github.com/BlackRoad-OS/${container_name}.git"
 
     log_info "Building Docker image on aria64..."
-    ssh ${ARIA64_USER}@${ARIA64_IP} "cd ~/blackroad/$container_name && docker build -t $container_name:latest ."
+    ssh "${ARIA64_USER}@${ARIA64_IP}" "cd ~/blackroad/${container_name} && docker build -t ${container_name}:latest ."
 
     log_info "Stopping old container (if exists)..."
-    ssh ${ARIA64_USER}@${ARIA64_IP} "docker stop $container_name 2>/dev/null || true && docker rm $container_name 2>/dev/null || true"
+    ssh "${ARIA64_USER}@${ARIA64_IP}" "docker stop ${container_name} 2>/dev/null || true && docker rm ${container_name} 2>/dev/null || true"
 
     log_info "Starting new container on port $next_port..."
-    ssh ${ARIA64_USER}@${ARIA64_IP} "docker run -d --name $container_name --restart unless-stopped -p $next_port:3000 $container_name:latest"
+    ssh "${ARIA64_USER}@${ARIA64_IP}" "docker run -d --name ${container_name} --restart unless-stopped -p ${next_port}:3000 ${container_name}:latest"
 
     # Add to Caddy
     log_info "Updating Caddy configuration..."
-    ssh ${ARIA64_USER}@${ARIA64_IP} "docker exec caddy sh -c 'cat >> /etc/caddy/Caddyfile << EOF
+    ssh "${ARIA64_USER}@${ARIA64_IP}" "docker exec caddy sh -c 'cat >> /etc/caddy/Caddyfile << EOF
 
 # $domain
 $domain {
@@ -268,13 +280,13 @@ route_through_tunnel() {
         exit 1
     fi
 
-    log_info "Routing $domain through Cloudflare Tunnel to localhost:$port"
+    validate_domain "$domain"
 
     # Add to Caddy if not already there
     log_info "Checking Caddy configuration..."
-    if ! ssh ${ARIA64_USER}@${ARIA64_IP} "docker exec caddy grep -q '$domain' /etc/caddy/Caddyfile"; then
+    if ! ssh "${ARIA64_USER}@${ARIA64_IP}" "docker exec caddy grep -q '${domain}' /etc/caddy/Caddyfile"; then
         log_info "Adding to Caddy..."
-        ssh ${ARIA64_USER}@${ARIA64_IP} "docker exec caddy sh -c 'cat >> /etc/caddy/Caddyfile << EOF
+        ssh "${ARIA64_USER}@${ARIA64_IP}" "docker exec caddy sh -c 'cat >> /etc/caddy/Caddyfile << EOF
 
 # $domain
 $domain {
@@ -314,7 +326,8 @@ check_status() {
 
     # HTTP check
     echo "HTTP Status:"
-    local http_code=$(curl -sI -o /dev/null -w "%{http_code}" "https://$domain" 2>/dev/null || echo "000")
+    local http_code
+    http_code=$(curl -sI -o /dev/null -w "%{http_code}" "https://$domain" 2>/dev/null || echo "000")
     if [[ "$http_code" == "200" ]]; then
         log_success "Site is UP (HTTP $http_code)"
     elif [[ "$http_code" == "000" ]]; then
@@ -327,8 +340,9 @@ check_status() {
     # Docker check
     echo "Docker Container:"
     local container_name="${domain//./-}"
-    if ssh ${ARIA64_USER}@${ARIA64_IP} "docker ps | grep -q $container_name"; then
-        local port=$(ssh ${ARIA64_USER}@${ARIA64_IP} "docker ps | grep $container_name | grep -oP '0\.0\.0\.0:\K\d+'")
+    if ssh "${ARIA64_USER}@${ARIA64_IP}" "docker ps | grep -q ${container_name}"; then
+        local port
+        port=$(ssh "${ARIA64_USER}@${ARIA64_IP}" "docker ps | grep ${container_name} | grep -oP '0\.0\.0\.0:\K\d+'")
         log_success "Container running on port $port"
     else
         log_info "No Docker container found for $domain"
@@ -340,7 +354,7 @@ list_deployments() {
     echo ""
 
     echo "=== Docker Containers on aria64 ==="
-    ssh ${ARIA64_USER}@${ARIA64_IP} "docker ps --format 'table {{.Names}}\t{{.Ports}}\t{{.Status}}' | grep -E 'blackroad|lucidia|docs'"
+    ssh "${ARIA64_USER}@${ARIA64_IP}" "docker ps --format 'table {{.Names}}\t{{.Ports}}\t{{.Status}}' | grep -E 'blackroad|lucidia|docs'"
     echo ""
 
     echo "=== Cloudflare Pages Projects ==="
